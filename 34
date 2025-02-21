@@ -1,0 +1,124 @@
+import pandas as pd
+import numpy as np
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from textblob import TextBlob # Для анализа тональности
+# Дополнительные библиотеки (установите, если необходимо)
+# !pip install beautifulsoup4  # Для удаления HTML-тегов
+from bs4 import BeautifulSoup
+# !pip install pyspellchecker # Для исправления орфографических ошибок
+
+# 1. Загрузка и предварительный просмотр данных
+df = pd.read_csv("geo-reviews-dataset_2023.csv")
+print(df.head())
+print(df.info())
+print(df.isnull().sum()) # Проверка на пропущенные значения
+
+# 2. Очистка и предобработка текста
+def clean_text(text):
+    # Удаление HTML-тегов
+    text = BeautifulSoup(text, "html.parser").get_text()
+    # Удаление специальных символов и цифр
+    text = re.sub(r'[^a-zA-Z\s]', '', text, re.I|re.A)
+    # Приведение к нижнему регистру
+    text = text.lower()
+    return text
+
+def preprocess_text(text):
+    # Токенизация (разбиение на слова)
+    words = nltk.word_tokenize(text)
+    # Удаление стоп-слов
+    stop_words = set(stopwords.words('english'))
+    words = [w for w in words if not w in stop_words]
+    # Лемматизация
+    lemmatizer = WordNetLemmatizer()
+    words = [lemmatizer.lemmatize(w) for w in words]
+    return " ".join(words)
+
+# Применение функций очистки и предобработки
+df['text'] = df['text'].astype(str) # Преобразуем в строку, если не строка
+df['cleaned_text'] = df['text'].apply(clean_text)
+df['processed_text'] = df['cleaned_text'].apply(preprocess_text)
+
+# 3. Анализ тональности (Sentiment Analysis)
+def get_sentiment(text):
+    analysis = TextBlob(text)
+    # Возвращает значение от -1 (очень негативный) до 1 (очень позитивный)
+    return analysis.sentiment.polarity
+
+df['sentiment'] = df['processed_text'].apply(get_sentiment)
+
+# Дополнительно: классификация тональности
+def classify_sentiment(score):
+    if score > 0.2:
+        return 'positive'
+    elif score < -0.2:
+        return 'negative'
+    else:
+        return 'neutral'
+
+df['sentiment_category'] = df['sentiment'].apply(classify_sentiment)
+
+print(df[['text', 'sentiment', 'sentiment_category']].head())
+
+# 4. Векторизация текста (TF-IDF)
+vectorizer = TfidfVectorizer(max_features=1000)  # Ограничиваем количество признаков
+X = vectorizer.fit_transform(df['processed_text'])
+
+# Преобразование в DataFrame для удобства анализа
+tfidf_df = pd.DataFrame(X.toarray(), columns=vectorizer.get_feature_names_out())
+
+# Объединение с исходными данными
+df = pd.concat([df, tfidf_df], axis=1)
+
+#5. Анализ важных признаков (Feature Importance)
+# Пример: используем оценку отеля (если она есть в вашем датасете) или тональность
+# в качестве целевой переменной и пытаемся предсказать ее на основе TF-IDF векторов
+
+if 'rating' in df.columns: # Замените 'rating' на фактическое имя столбца с оценкой
+    y = df['rating'] # Используем оценку отеля
+else:
+    y = df['sentiment'] # Используем тональность, если нет оценки
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = LogisticRegression()
+model.fit(X_train, y_train)
+
+# Получаем коэффициенты (веса) признаков
+feature_importance = model.coef_[0] # Для мультиклассовой классификации может потребоваться иная индексация
+
+# Создаем DataFrame для отображения важности признаков
+feature_importance_df = pd.DataFrame({'feature': vectorizer.get_feature_names_out(), 'importance': feature_importance})
+feature_importance_df = feature_importance_df.sort_values('importance', ascending=False)
+
+print("Наиболее важные признаки:")
+print(feature_importance_df.head(10))
+
+# 6. Создание модели рекомендаций (Content-Based Filtering - пример)
+
+# Функция для поиска отелей, похожих на заданный отель
+def find_similar_hotels(hotel_index, num_recommendations=5):
+    # Вычисляем косинусное сходство между отзывами
+    from sklearn.metrics.pairwise import cosine_similarity
+    cosine_similarities = cosine_similarity(X[hotel_index], X).flatten()
+    # Получаем индексы наиболее похожих отелей
+    similar_hotel_indices = cosine_similarities.argsort()[::-1][1:num_recommendations+1] # Исключаем сам отель
+    return df.iloc[similar_hotel_indices][['hotel_name', 'text', 'sentiment']] # Замените 'hotel_name' на актуальный столбец
+
+# Пример использования:
+hotel_index_to_recommend = 0  # Индекс отеля, для которого хотим получить рекомендации
+recommendations = find_similar_hotels(hotel_index_to_recommend, num_recommendations=3)
+print(f"Рекомендации для отеля с индексом {hotel_index_to_recommend}:")
+print(recommendations)
+
+# Дальнейшие шаги:
+# 7. Оценка модели (если есть данные для оценки)
+#   - Если есть данные о взаимодействии пользователей с отелями (например, бронирования, просмотры), можно оценить модель.
+#   - Метрики: precision@k, recall@k, NDCG@k
